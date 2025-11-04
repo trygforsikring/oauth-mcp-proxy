@@ -424,3 +424,287 @@ func TestServerHelperMethods(t *testing.T) {
 		}
 	})
 }
+
+// TestWrapMCPEndpoint401 tests automatic 401 handling for /mcp endpoints
+func TestWrapMCPEndpoint401(t *testing.T) {
+	cfg := &Config{
+		Mode:      "native",
+		Provider:  "hmac",
+		Audience:  "api://test",
+		JWTSecret: []byte("test-secret-key-must-be-32-bytes-long!"),
+		ServerURL: "https://test-server.com",
+	}
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	handlerCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("success"))
+	})
+
+	wrapped := server.WrapMCPEndpoint(mockHandler)
+
+	tests := []struct {
+		name          string
+		method        string
+		authHeader    string
+		expectStatus  int
+		expectHeaders bool
+		expectBody    string
+		expectBypass  bool
+		expectError   string
+	}{
+		{
+			name:          "Missing token returns 401",
+			method:        "GET",
+			authHeader:    "",
+			expectStatus:  401,
+			expectHeaders: true,
+			expectBypass:  false,
+			expectError:   "invalid_request",
+		},
+		{
+			name:          "OPTIONS passthrough",
+			method:        "OPTIONS",
+			authHeader:    "",
+			expectStatus:  200,
+			expectHeaders: false,
+			expectBody:    "success",
+			expectBypass:  true,
+		},
+		{
+			name:          "Basic auth rejected",
+			method:        "GET",
+			authHeader:    "Basic dXNlcjpwYXNz",
+			expectStatus:  401,
+			expectHeaders: true,
+			expectBypass:  false,
+			expectError:   "invalid_request",
+		},
+		{
+			name:          "Malformed Bearer (no space) rejected",
+			method:        "GET",
+			authHeader:    "Bearertoken123",
+			expectStatus:  401,
+			expectHeaders: true,
+			expectBypass:  false,
+			expectError:   "invalid_token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlerCalled = false
+			req := httptest.NewRequest(tt.method, "/mcp", nil)
+			if tt.authHeader != "" {
+				req.Header.Set("Authorization", tt.authHeader)
+			}
+			rec := httptest.NewRecorder()
+
+			wrapped.ServeHTTP(rec, req)
+
+			if rec.Code != tt.expectStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.expectStatus)
+			}
+
+			if tt.expectBypass && !handlerCalled {
+				t.Error("Handler should have been called (bypass expected)")
+			}
+			if !tt.expectBypass && handlerCalled {
+				t.Error("Handler should NOT have been called (auth bypass prevented)")
+			}
+
+			if tt.expectHeaders {
+				header := rec.Header().Get("Www-Authenticate")
+				if header == "" {
+					t.Error("WWW-Authenticate header missing")
+				}
+
+				// Check header contains all required Bearer challenge parameters
+				if !strings.Contains(header, "Bearer") {
+					t.Errorf("WWW-Authenticate header missing Bearer scheme: %s", header)
+				}
+				if tt.expectError != "" && !strings.Contains(header, tt.expectError) {
+					t.Errorf("WWW-Authenticate header missing error code %s: %s", tt.expectError, header)
+				}
+				if !strings.Contains(header, "resource_metadata") {
+					t.Errorf("WWW-Authenticate header missing resource_metadata: %s", header)
+				}
+
+				// Check JSON error response
+				body := rec.Body.String()
+				if tt.expectError != "" && !strings.Contains(body, tt.expectError) {
+					t.Errorf("Response body missing %s error: %s", tt.expectError, body)
+				}
+			}
+
+			if tt.expectBody != "" && !strings.Contains(rec.Body.String(), tt.expectBody) {
+				t.Errorf("body = %s, want to contain %s", rec.Body.String(), tt.expectBody)
+			}
+		})
+	}
+}
+
+// TestReturn401 tests the Return401 method directly
+func TestReturn401(t *testing.T) {
+	cfg := &Config{
+		Mode:      "native",
+		Provider:  "hmac",
+		Audience:  "api://test",
+		JWTSecret: []byte("test-secret-key-must-be-32-bytes-long!"),
+		ServerURL: "https://test-server.com",
+	}
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	server.Return401(rec)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	header := rec.Header().Get("Www-Authenticate")
+	if header == "" {
+		t.Fatal("WWW-Authenticate header missing")
+	}
+
+	// Verify Bearer challenge with all parameters in single header
+	if !strings.Contains(header, "Bearer realm=\"OAuth\"") {
+		t.Errorf("Missing Bearer realm in header: %s", header)
+	}
+	if !strings.Contains(header, "error=\"invalid_request\"") {
+		t.Errorf("Wrong error code, expected invalid_request: %s", header)
+	}
+	if !strings.Contains(header, "Bearer token required") {
+		t.Errorf("Missing error description: %s", header)
+	}
+
+	// Verify resource_metadata parameter
+	if !strings.Contains(header, "resource_metadata") {
+		t.Errorf("Missing resource_metadata: %s", header)
+	}
+	if !strings.Contains(header, "https://test-server.com/.well-known/oauth-protected-resource") {
+		t.Errorf("Wrong resource_metadata URL: %s", header)
+	}
+
+	// Verify JSON body
+	body := rec.Body.String()
+	if !strings.Contains(body, "\"error\":\"invalid_request\"") {
+		t.Errorf("Wrong JSON error code: %s", body)
+	}
+	if !strings.Contains(body, "\"error_description\":\"Bearer token required\"") {
+		t.Errorf("Wrong JSON error description: %s", body)
+	}
+
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %s, want application/json", ct)
+	}
+}
+
+// TestReturn401InvalidToken tests the Return401InvalidToken method
+func TestReturn401InvalidToken(t *testing.T) {
+	cfg := &Config{
+		Mode:      "native",
+		Provider:  "hmac",
+		Audience:  "api://test",
+		JWTSecret: []byte("test-secret-key-must-be-32-bytes-long!"),
+		ServerURL: "https://test-server.com",
+	}
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	server.Return401InvalidToken(rec)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	header := rec.Header().Get("Www-Authenticate")
+	if header == "" {
+		t.Fatal("WWW-Authenticate header missing")
+	}
+
+	// Verify Bearer challenge with invalid_token error
+	if !strings.Contains(header, "error=\"invalid_token\"") {
+		t.Errorf("Wrong error code, expected invalid_token: %s", header)
+	}
+	if !strings.Contains(header, "Authentication failed") {
+		t.Errorf("Missing error description: %s", header)
+	}
+
+	// Verify resource_metadata parameter
+	if !strings.Contains(header, "resource_metadata") {
+		t.Errorf("Missing resource_metadata: %s", header)
+	}
+
+	// Verify JSON body
+	body := rec.Body.String()
+	if !strings.Contains(body, "\"error\":\"invalid_token\"") {
+		t.Errorf("Wrong JSON error code: %s", body)
+	}
+	if !strings.Contains(body, "\"error_description\":\"Authentication failed\"") {
+		t.Errorf("Wrong JSON error description: %s", body)
+	}
+}
+
+// TestWrapMCPEndpointValidation tests that WrapMCPEndpoint validates tokens for mark3labs
+// Note: mark3labs relies on middleware for actual validation, this just tests presence check
+func TestWrapMCPEndpointWithValidToken(t *testing.T) {
+	cfg := &Config{
+		Mode:      "native",
+		Provider:  "hmac",
+		Audience:  "api://test",
+		JWTSecret: []byte("test-secret-key-must-be-32-bytes-long!"),
+		ServerURL: "https://test-server.com",
+		Issuer:    "https://test.example.com",
+	}
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Create a valid HMAC token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": "testuser",
+		"aud": "api://test",
+		"iss": "https://test.example.com",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	tokenString, _ := token.SignedString(cfg.JWTSecret)
+
+	handlerCalled := false
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		// Verify token was added to context
+		tokenFromCtx, ok := GetOAuthToken(r.Context())
+		if !ok || tokenFromCtx == "" {
+			t.Error("Token not in context")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := server.WrapMCPEndpoint(mockHandler)
+
+	req := httptest.NewRequest("GET", "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	rec := httptest.NewRecorder()
+
+	wrapped.ServeHTTP(rec, req)
+
+	if !handlerCalled {
+		t.Error("Handler was not called with valid token")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}

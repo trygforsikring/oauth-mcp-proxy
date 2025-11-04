@@ -13,13 +13,15 @@ OAuth 2.1 authentication library for Go MCP servers.
 ```go
 import "github.com/tuannvm/oauth-mcp-proxy/mark3labs"
 
-_, oauthOption, _ := mark3labs.WithOAuth(mux, &oauth.Config{
+oauthServer, oauthOption, _ := mark3labs.WithOAuth(mux, &oauth.Config{
     Provider: "okta",
     Issuer:   "https://your-company.okta.com",
     Audience: "api://your-mcp-server",
 })
 
 mcpServer := server.NewMCPServer("Server", "1.0.0", oauthOption)
+streamable := server.NewStreamableHTTPServer(mcpServer, /*options*/)
+mux.HandleFunc("/mcp", oauthServer.WrapMCPEndpoint(streamable))
 ```
 
 ### Official SDK
@@ -45,6 +47,7 @@ http.ListenAndServe(":8080", handler)
 
 - **Dual SDK support** - Works with both mark3labs and official SDKs
 - **Simple integration** - One `WithOAuth()` call protects all tools
+- **Automatic 401 handling** - RFC 6750 compliant error responses with OAuth discovery
 - **Zero per-tool config** - All tools automatically protected
 - **Fast token caching** - 5-min cache, <5ms validation
 - **Production ready** - Security hardened, battle-tested
@@ -149,7 +152,7 @@ import (
 mux := http.NewServeMux()
 
 // Enable OAuth (one time setup)
-_, oauthOption, _ := mark3labs.WithOAuth(mux, &oauth.Config{
+oauthServer, oauthOption, _ := mark3labs.WithOAuth(mux, &oauth.Config{
     Provider: "okta",                    // or "hmac", "google", "azure"
     Issuer:   "https://your-company.okta.com",
     Audience: "api://your-mcp-server",
@@ -162,12 +165,12 @@ mcpServer := mcpserver.NewMCPServer("Server", "1.0.0", oauthOption)
 // Add tools - all automatically protected
 mcpServer.AddTool(myTool, myHandler)
 
-// Setup endpoint
+// Setup endpoint with automatic 401 handling
 streamable := mcpserver.NewStreamableHTTPServer(
     mcpServer,
     mcpserver.WithHTTPContextFunc(oauth.CreateHTTPContextFunc()),
 )
-mux.Handle("/mcp", streamable)
+mux.HandleFunc("/mcp", oauthServer.WrapMCPEndpoint(streamable))
 ```
 
 #### 3. Access Authenticated User
@@ -265,8 +268,8 @@ See [examples/README.md](examples/README.md) for detailed setup guide including 
 
 **Getting Started:**
 
+- [Setup Guide](docs/CLIENT-SETUP.md) - Complete server integration and client configuration
 - [Configuration Guide](docs/CONFIGURATION.md) - All config options
-- [Client Setup](docs/CLIENT-SETUP.md) - Client configuration
 - [Provider Setup](docs/providers/) - OAuth provider guides
 
 **Advanced:**

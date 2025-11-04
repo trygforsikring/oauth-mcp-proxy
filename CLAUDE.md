@@ -134,15 +134,76 @@ Run single test:
 go test -v -run TestName ./...
 ```
 
+### Test Patterns
+
+Tests use **table-driven subtests** with `t.Run()`:
+
+```go
+tests := []struct {
+    name string
+    // test fields
+}{...}
+for _, tt := range tests {
+    t.Run(tt.name, func(t *testing.T) {
+        // test body
+    })
+}
+```
+
+Mock validators implement `TokenValidator` interface. Use `httptest.NewRecorder()` for HTTP handler tests.
+
+## Configuration
+
+### ConfigBuilder Pattern (Recommended)
+
+Use `ConfigBuilder` for production code instead of direct `Config` structs:
+
+```go
+cfg, _ := oauth.NewConfigBuilder().
+    WithProvider("okta").
+    WithIssuer("https://company.okta.com").
+    WithAudience("api://my-server").
+    WithHost(host).WithPort(port).
+    Build()
+```
+
+`Build()` validates config and auto-constructs `ServerURL` if not set.
+
+### Context Timeouts
+
+- **OIDC validation**: 10 seconds
+- **Provider initialization**: 30 seconds
+
+## Security Requirements
+
+1. **Redirect URI validation**: All URIs must be in explicit allowlist
+2. **State parameter HMAC**: OAuth states are HMAC-signed to prevent CSRF
+3. **Audience validation**: Both HMAC and OIDC validators explicitly check `aud` claim
+4. **No raw token logging**: Only log `fmt.Sprintf("%x", sha256.Sum256([]byte(token)))[:16]`
+5. **TLS in production**: Always warn if `useTLS=false` in `LogStartup()`
 
 ## Important Notes
 
 1. **User Context**: Always use `GetUserFromContext(ctx)` in tool handlers to access authenticated user
-2. **Token Caching**: Tokens cached for 5 minutes - design for this TTL in testing
+2. **Token Caching**: Tokens cached for 5 minutes - design for this TTL in testing. Cache uses `sync.RWMutex` with background cleanup via `deleteExpiredToken()` goroutine
 3. **Logging**: Config.Logger is optional. If nil, uses default logger (log.Printf with level prefixes)
-4. **Modes**: Library supports "native" (token validation only) and "proxy" (OAuth flow proxy) modes
-5. **Security**: All redirect URIs validated, state parameters HMAC-signed, tokens never logged (only hash previews)
-6. **Adapter Pattern**: `WithOAuth()` is in adapter packages (`mark3labs.WithOAuth()` or `mcp.WithOAuth()`) for SDK-specific integration.
+4. **Modes**: Library supports "native" (token validation only) and "proxy" (OAuth flow proxy) modes. Auto-detected based on `ClientID` presence
+5. **Adapter Pattern**: `WithOAuth()` is in adapter packages (`mark3labs.WithOAuth()` or `mcp.WithOAuth()`) for SDK-specific integration
+
+## Common Gotchas
+
+1. **SDK Imports**: Adapter code (`mark3labs/`, `mcp/`) can import SDKs. **Core package cannot** - keep it SDK-agnostic
+2. **Context Propagation**: Always extract user via `GetUserFromContext(ctx)` in tool handlers
+3. **Cache Expiry**: Background cleanup runs in goroutine to avoid lock contention
+4. **Mode Detection**: Config auto-detects "native" vs "proxy" based on `ClientID` presence
+5. **Logger Fallback**: If `cfg.Logger == nil`, uses `defaultLogger{}` with `log.Printf`
+
+## File Naming Conventions
+
+- Core logic: `oauth.go`, `config.go`, `cache.go`, `context.go`, `handlers.go`, `middleware.go`
+- Tests: `*_test.go` (e.g., `security_test.go`, `integration_test.go`)
+- Adapters: `mark3labs/oauth.go`, `mcp/oauth.go` (not `*_adapter.go`)
+- Provider: `provider/provider.go` (single file, multiple validators)
 
 ## Using the Library
 
@@ -153,9 +214,14 @@ import (
     "github.com/tuannvm/oauth-mcp-proxy/mark3labs"
 )
 
-_, oauthOption, _ := mark3labs.WithOAuth(mux, &oauth.Config{...})
+oauthServer, oauthOption, _ := mark3labs.WithOAuth(mux, &oauth.Config{...})
 mcpServer := server.NewMCPServer("name", "1.0.0", oauthOption)
+
+streamableServer := server.NewStreamableHTTPServer(mcpServer, ...)
+mux.HandleFunc("/mcp", oauthServer.WrapMCPEndpoint(streamableServer))
 ```
+
+**Note**: `WrapMCPEndpoint()` provides automatic 401 handling with proper WWW-Authenticate headers when Bearer token is missing. It also passes through OPTIONS requests (CORS) and non-Bearer auth schemes.
 
 ### With Official SDK
 ```go
@@ -166,5 +232,35 @@ import (
 
 mcpServer := mcp.NewServer(&mcp.Implementation{...}, nil)
 _, handler, _ := mcpoauth.WithOAuth(mux, &oauth.Config{...}, mcpServer)
-http.ListenAndServe(":8080", handler)
+http.ListenAndServe(":8080", handler) // 401 handling automatic
 ```
+
+**Note**: Official SDK adapter includes automatic 401 handling in the returned handler.
+
+## Extending the Library
+
+### Adding a New OAuth Provider
+
+1. Add validator to `provider/provider.go` implementing `TokenValidator` interface
+2. Update `createValidator()` switch in `config.go`
+3. Add provider documentation in `docs/providers/`
+
+### Adding a New SDK Adapter
+
+1. Create `<sdk>/oauth.go` with `WithOAuth()` function
+2. Follow pattern: create `oauth.Server`, register handlers, return SDK-specific middleware/option
+3. Never import MCP SDKs in core package
+
+### Adding New Endpoints
+
+1. Add handler method to `OAuth2Handler` in `handlers.go`
+2. Register in `RegisterHandlers()` in `oauth.go`
+
+## Documentation References
+
+- `examples/README.md` - Complete setup guide with Okta configuration
+- `examples/mark3labs/` and `examples/official/` - Working examples (simple + advanced)
+- `docs/providers/*.md` - Provider-specific setup (OKTA.md, GOOGLE.md, AZURE.md, HMAC.md)
+- `docs/CONFIGURATION.md` - All configuration options
+- `docs/SECURITY.md` - Production best practices
+- `docs/TROUBLESHOOTING.md` - Common issues and solutions
