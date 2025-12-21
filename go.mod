@@ -1,6 +1,6 @@
 module github.com/tuannvm/oauth-mcp-proxy
 
-go 1.24.9
+go 1.25
 
 require (
 	github.com/coreos/go-oidc/v3 v3.16.0
