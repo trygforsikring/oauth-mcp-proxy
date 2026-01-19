@@ -43,6 +43,10 @@ type OAuth2Config struct {
 	// FixedRedirectURI is an optional fixed redirect URI used when proxying callbacks
 	FixedRedirectURI string
 
+	// AllowedClientRedirectDomains is an optional comma-separated list of domain suffixes
+	// that are allowed for client redirect URIs in fixed redirect mode (in addition to localhost).
+	AllowedClientRedirectDomains string
+
 	// OIDC configuration
 	Issuer       string
 	Audience     string
@@ -186,22 +190,23 @@ func NewOAuth2ConfigFromConfig(cfg *Config, version string) *OAuth2Config {
 	}
 
 	return &OAuth2Config{
-		Enabled:          true,
-		Mode:             cfg.Mode,
-		Provider:         cfg.Provider,
-		RedirectURIs:     cfg.RedirectURIs,
-		FixedRedirectURI: cfg.FixedRedirectURI,
-		Issuer:           cfg.Issuer,
-		Audience:         cfg.Audience,
-		ClientID:         cfg.ClientID,
-		ClientSecret:     cfg.ClientSecret,
-		Scopes:           scopes,
-		MCPHost:          mcpHost,
-		MCPPort:          mcpPort,
-		MCPURL:           mcpURL,
-		Scheme:           scheme,
-		Version:          version,
-		stateSigningKey:  cfg.JWTSecret,
+		Enabled:                      true,
+		Mode:                         cfg.Mode,
+		Provider:                     cfg.Provider,
+		RedirectURIs:                 cfg.RedirectURIs,
+		FixedRedirectURI:             cfg.FixedRedirectURI,
+		AllowedClientRedirectDomains: cfg.AllowedClientRedirectDomains,
+		Issuer:                       cfg.Issuer,
+		Audience:                     cfg.Audience,
+		ClientID:                     cfg.ClientID,
+		ClientSecret:                 cfg.ClientSecret,
+		Scopes:                       scopes,
+		MCPHost:                      mcpHost,
+		MCPPort:                      mcpPort,
+		MCPURL:                       mcpURL,
+		Scheme:                       scheme,
+		Version:                      version,
+		stateSigningKey:              cfg.JWTSecret,
 	}
 }
 
@@ -353,15 +358,15 @@ func (h *OAuth2Handler) HandleAuthorize(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// Security: For fixed redirect mode, only allow localhost or loopback addresses
-		// This prevents open redirect attacks while still supporting development tools
-		if !isLocalhostURI(clientRedirectURI) {
-			h.logger.Warn("SECURITY: Fixed redirect mode only allows localhost URIs, rejecting: %s from %s", clientRedirectURI, r.RemoteAddr)
-			http.Error(w, "Fixed redirect mode only allows localhost redirect URIs for security. Use allowlist mode for production.", http.StatusBadRequest)
+		// Security: For fixed redirect mode, only allow localhost or explicitly configured domain suffixes.
+		// This prevents open redirect attacks while still supporting development tools and trusted hosts.
+		if !h.isAllowedClientRedirectURI(clientRedirectURI) {
+			h.logger.Warn("SECURITY: Fixed redirect mode only allows localhost or configured domains, rejecting: %s from %s", clientRedirectURI, r.RemoteAddr)
+			http.Error(w, fmt.Sprintf("Invalid redirect_uri for fixed redirect mode: %s", clientRedirectURI), http.StatusBadRequest)
 			return
 		}
 		redirectURI = strings.TrimSpace(h.config.FixedRedirectURI)
-		h.logger.Info("OAuth2: Validated localhost redirect URI for proxy: %s", clientRedirectURI)
+		h.logger.Info("OAuth2: Validated client redirect URI for proxy: %s", clientRedirectURI)
 		// For fixed redirect mode, create signed state with client redirect URI
 		// Create state data with redirect URI
 		stateData := map[string]string{
@@ -466,14 +471,14 @@ func (h *OAuth2Handler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 		if hasState && hasRedirect {
 			// Re-validate redirect URI for defense in depth
-			// Even though state is HMAC-signed, validate the redirect URI is localhost
-			if !isLocalhostURI(originalRedirectURI) {
-				h.logger.Warn("SECURITY: Callback redirect URI is not localhost (possible key compromise): %s", originalRedirectURI)
+			// Even though state is HMAC-signed, validate the redirect URI is localhost or an allowed domain
+			if !h.isAllowedClientRedirectURI(originalRedirectURI) {
+				h.logger.Warn("SECURITY: Callback redirect URI is not allowed (possible key compromise): %s", originalRedirectURI)
 				http.Error(w, "Invalid redirect URI in state", http.StatusBadRequest)
 				return
 			}
 
-			h.logger.Info("OAuth2: State verified, proxying callback to localhost client: %s", originalRedirectURI)
+			h.logger.Info("OAuth2: State verified, proxying callback to client redirect URI: %s", originalRedirectURI)
 
 			// Build proxy callback URL
 			proxyURL := fmt.Sprintf("%s?code=%s&state=%s", originalRedirectURI, code, originalState)
@@ -799,6 +804,47 @@ func isLocalhostURI(uri string) bool {
 
 	hostname := strings.ToLower(parsedURI.Hostname())
 	return hostname == "localhost" || hostname == "127.0.0.1" || hostname == "::1"
+}
+
+// isAllowedClientRedirectURI checks whether a client redirect URI is allowed in fixed redirect mode.
+func (h *OAuth2Handler) isAllowedClientRedirectURI(uri string) bool {
+	// Always allow localhost URIs for development tools
+	if isLocalhostURI(uri) {
+		return true
+	}
+
+	// For non-localhost URIs, require explicit domain suffix configuration
+	if h.config.AllowedClientRedirectDomains == "" {
+		return false
+	}
+
+	parsedURI, err := url.Parse(uri)
+	if err != nil {
+		return false
+	}
+
+	// Only allow HTTPS for non-localhost URIs
+	if parsedURI.Scheme != "https" {
+		return false
+	}
+
+	host := strings.ToLower(parsedURI.Hostname())
+	if host == "" {
+		return false
+	}
+
+	// Check if host matches any configured suffix (exact match or subdomain)
+	for _, suffix := range strings.Split(h.config.AllowedClientRedirectDomains, ",") {
+		suffix = strings.TrimSpace(strings.ToLower(suffix))
+		if suffix == "" {
+			continue
+		}
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // isValidRedirectURI validates redirect URI against allowlist for security

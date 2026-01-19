@@ -71,6 +71,98 @@ func TestRedirectURIValidation(t *testing.T) {
 	}
 }
 
+func TestIsAllowedClientRedirectURI(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowed   string
+		uri       string
+		isAllowed bool
+	}{
+		{
+			name:      "Localhost HTTP allowed without domains",
+			allowed:   "",
+			uri:       "http://localhost:8080/callback",
+			isAllowed: true,
+		},
+		{
+			name:      "Localhost IPv4 allowed without domains",
+			allowed:   "",
+			uri:       "http://127.0.0.1:3000/callback",
+			isAllowed: true,
+		},
+		{
+			name:      "Localhost IPv6 allowed without domains",
+			allowed:   "",
+			uri:       "http://[::1]:9000/callback",
+			isAllowed: true,
+		},
+		{
+			name:      "Non-localhost without allowed domains rejected",
+			allowed:   "",
+			uri:       "https://example.com/callback",
+			isAllowed: false,
+		},
+		{
+			name:      "HTTPS exact domain match allowed",
+			allowed:   "example.com",
+			uri:       "https://example.com/callback",
+			isAllowed: true,
+		},
+		{
+			name:      "HTTPS subdomain match allowed",
+			allowed:   "example.com",
+			uri:       "https://app.example.com/callback",
+			isAllowed: true,
+		},
+		{
+			name:      "Multiple domains with spaces allowed",
+			allowed:   "example.com, dummy.com ",
+			uri:       "https://client1.dummy.com/proxy/40073/callback",
+			isAllowed: true,
+		},
+		{
+			name:      "Partial suffix does not match",
+			allowed:   "example.com",
+			uri:       "https://evil-example.com/callback",
+			isAllowed: false,
+		},
+		{
+			name:      "HTTP non-localhost rejected even if domain configured",
+			allowed:   "example.com",
+			uri:       "http://example.com/callback",
+			isAllowed: false,
+		},
+		{
+			name:      "Non-HTTPS scheme rejected",
+			allowed:   "example.com",
+			uri:       "custom://example.com/callback",
+			isAllowed: false,
+		},
+		{
+			name:      "Invalid URI rejected",
+			allowed:   "example.com",
+			uri:       "not-a-valid-uri",
+			isAllowed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := &OAuth2Handler{
+				config: &OAuth2Config{
+					AllowedClientRedirectDomains: tt.allowed,
+				},
+				logger: &defaultLogger{},
+			}
+
+			got := handler.isAllowedClientRedirectURI(tt.uri)
+			if got != tt.isAllowed {
+				t.Errorf("isAllowedClientRedirectURI(%q) = %v, want %v (allowed=%q)", tt.uri, got, tt.isAllowed, tt.allowed)
+			}
+		})
+	}
+}
+
 func TestOAuthParameterValidation(t *testing.T) {
 	handler := &OAuth2Handler{logger: &defaultLogger{}}
 

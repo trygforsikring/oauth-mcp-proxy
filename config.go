@@ -11,10 +11,11 @@ import (
 // Config holds OAuth configuration
 type Config struct {
 	// OAuth settings
-	Mode             string // "native" or "proxy"
-	Provider         string // "hmac", "okta", "google", "azure"
-	RedirectURIs     string // Redirect URIs allowlist (single or comma-separated)
-	FixedRedirectURI string // Optional fixed redirect URI used for proxying callbacks
+	Mode                         string // "native" or "proxy"
+	Provider                     string // "hmac", "okta", "google", "azure"
+	RedirectURIs                 string // Redirect URIs allowlist (single or comma-separated)
+	FixedRedirectURI             string // Optional fixed redirect URI used for proxying callbacks
+	AllowedClientRedirectDomains string // Optional comma-separated list of domain suffixes allowed for client redirect URIs in fixed redirect mode (in addition to localhost)
 
 	// OIDC configuration
 	Issuer       string
@@ -204,6 +205,12 @@ func (b *ConfigBuilder) WithFixedRedirectURI(uri string) *ConfigBuilder {
 	return b
 }
 
+// WithAllowedClientRedirectDomains sets allowed client redirect domains
+func (b *ConfigBuilder) WithAllowedClientRedirectDomains(domains string) *ConfigBuilder {
+	b.config.AllowedClientRedirectDomains = domains
+	return b
+}
+
 // WithIssuer sets the OIDC issuer
 func (b *ConfigBuilder) WithIssuer(issuer string) *ConfigBuilder {
 	b.config.Issuer = issuer
@@ -327,6 +334,7 @@ func FromEnv() (*Config, error) {
 		WithProvider(getEnv("OAUTH_PROVIDER", "")).
 		WithRedirectURIs(getEnv("OAUTH_REDIRECT_URIS", "")).
 		WithFixedRedirectURI(getEnv("OAUTH_FIXED_REDIRECT_URI", "")).
+		WithAllowedClientRedirectDomains(getEnv("OAUTH_ALLOWED_CLIENT_REDIRECT_DOMAINS", "")).
 		WithIssuer(getEnv("OIDC_ISSUER", "")).
 		WithAudience(getEnv("OIDC_AUDIENCE", "")).
 		WithClientID(getEnv("OIDC_CLIENT_ID", "")).
