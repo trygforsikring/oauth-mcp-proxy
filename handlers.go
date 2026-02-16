@@ -415,6 +415,15 @@ func (h *OAuth2Handler) HandleAuthorize(w http.ResponseWriter, r *http.Request) 
 		parsedURL.RawQuery = query.Encode()
 		authURL = parsedURL.String()
 	}
+	
+	if parsedURL, err := url.Parse(authURL); err == nil {
+		q := parsedURL.Query()
+		if q.Get("prompt") == "" {
+			q.Set("prompt", "consent")
+		}
+		parsedURL.RawQuery = q.Encode()
+		authURL = parsedURL.String()
+	}
 
 	h.logger.Info("OAuth2: Redirecting to authorization URL: %s", authURL)
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
